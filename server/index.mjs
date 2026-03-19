@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.API_PORT ?? 8787);
 const MODEL = process.env.AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.4";
@@ -23,6 +24,8 @@ const rateLimitBuckets = new Map();
 let lastRateLimitSweepAt = 0;
 
 const app = express();
+const isExecutedDirectly =
+  typeof process.argv[1] === "string" && fileURLToPath(import.meta.url) === process.argv[1];
 
 if (TRUST_PROXY) {
   app.set("trust proxy", true);
@@ -57,7 +60,7 @@ app.use(
     origin: (origin, callback) => {
       callback(null, isOriginAllowed(origin));
     },
-    methods: ["POST", "OPTIONS"],
+    methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
     optionsSuccessStatus: 204,
   }),
@@ -340,7 +343,103 @@ const requestModelText = async ({ instructions, input, temperature, maxOutputTok
   };
 };
 
+const normalizePrompt = (text) => {
+  if (typeof text !== "string") {
+    return "";
+  }
+
+  return text
+    .toLowerCase()
+    .replace(/[—–-]/g, " ")
+    .replace(/[^a-z0-9$\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+const getLatestUserMessage = (messages) => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const item = messages[index];
+    if (item?.role === "user" && typeof item.content === "string" && item.content.trim()) {
+      return item.content.trim();
+    }
+  }
+
+  return "";
+};
+
+const getStaticPresetReply = (latestUserPrompt) => {
+  const normalized = normalizePrompt(latestUserPrompt);
+
+  const isBudgetItineraryPrompt =
+    normalized.includes("7 days") &&
+    normalized.includes("$600") &&
+    normalized.includes("avoid crowds") &&
+    (normalized.includes("build me a nepal trip") || normalized.includes("nepal trip"));
+
+  if (isBudgetItineraryPrompt) {
+    return [
+      "Great constraint set—here’s a low-crowd 7-day Nepal plan around a ~$600 core budget (excluding international flights):",
+      "Day 1: Arrive Kathmandu, explore Patan + local food walk, overnight in quieter Lalitpur zone.",
+      "Day 2: Drive to Bandipur (heritage hill town), sunset ridge walk.",
+      "Day 3: Bandipur to Pokhara outskirts (Lakeside edges, not center).",
+      "Day 4: Sunrise at Peace Pagoda + easy hike to nearby villages.",
+      "Day 5: Day trip to Begnas/Rupa Lake area (calmer than main hotspots).",
+      "Day 6: Return toward Kathmandu via Dhulikhel for mountain viewpoints.",
+      "Day 7: Bhaktapur morning visit + departure.",
+      "Budget guide: stay ~$18–25/night, food ~$10–14/day, local transport ~$12–20/day, activities buffer ~$80 total.",
+      "Crowd tip: start sightseeing before 8:00 AM and shift major transit to weekday mornings.",
+    ].join("\n");
+  }
+
+  const isPokharaNearbyPrompt =
+    normalized.includes("pokhara") &&
+    (normalized.includes("what can i explore near") || normalized.includes("explore near"));
+
+  if (isPokharaNearbyPrompt) {
+    return [
+      "Near Pokhara, you can mix lakeside chill spots with short hikes and cultural stops:",
+      "- Peace Pagoda + Raniban forest trail (easy-moderate, strong city/lake views).",
+      "- Sarangkot sunrise point (best for early Himalayan panorama).",
+      "- Begnas Lake + Rupa Lake belt (quieter alternatives to busy Lakeside).",
+      "- Davis Falls + Gupteshwor Cave combo (compact half-day route).",
+      "- Pumdikot Shiva viewpoint for sunset and valley perspective.",
+      "If you want, I can also frame this as a 1-day or 2-day mini itinerary by pace (relaxed vs active).",
+    ].join("\n");
+  }
+
+  const isComparePlacesPrompt =
+    normalized.includes("how do i use this page") &&
+    normalized.includes("compare places") &&
+    normalized.includes("nepal");
+
+  if (isComparePlacesPrompt) {
+    return [
+      "Quick way to compare places on this Explore page:",
+      "1) Use From and Where To fields to set your two reference destinations.",
+      "2) Click destination cards or map pins to switch focus and inspect nearby options.",
+      "3) Check crowd trend + forecast panels to see which destination is likely calmer in coming weeks.",
+      "4) Open budget and safety tools to compare daily cost, permits, and risk level side by side.",
+      "5) Use All Places reset, then repeat with your next shortlist.",
+      "Pro move: compare the same pair for both weekday and weekend travel windows before finalizing.",
+    ].join("\n");
+  }
+
+  return null;
+};
+
 const requestModelReply = async ({ messages, context }) => {
+  const staticPresetReply = getStaticPresetReply(getLatestUserMessage(messages));
+
+  if (staticPresetReply) {
+    return {
+      ok: true,
+      status: 200,
+      payload: {
+        reply: staticPresetReply,
+      },
+    };
+  }
+
   const modelResponse = await requestModelText({
     instructions: buildInstructions(context),
     input: messages,
@@ -391,6 +490,24 @@ const requestPhotoInsight = async (photo) => {
     },
   };
 };
+
+app.get("/api/health", (_req, res) => {
+  const isConfigured = Boolean(ENDPOINT && API_KEY);
+
+  if (!isConfigured) {
+    return res.status(503).json({
+      ok: false,
+      configured: false,
+      error: "The chat service is not configured. Add the Azure OpenAI environment variables first.",
+    });
+  }
+
+  return res.status(200).json({
+    ok: true,
+    configured: true,
+    model: MODEL,
+  });
+});
 
 // Rate limiter middleware for /api/chat
 const rateLimitMiddleware = (req, res, next) => {
@@ -465,6 +582,10 @@ app.use((_req, res) => {
   res.status(404).json({ error: "Not found." });
 });
 
-app.listen(PORT, () => {
-  console.log(`Smart Trails Express server listening on http://localhost:${PORT}`);
-});
+if (isExecutedDirectly) {
+  app.listen(PORT, () => {
+    console.log(`Smart Trails Express server listening on http://localhost:${PORT}`);
+  });
+}
+
+export default app;

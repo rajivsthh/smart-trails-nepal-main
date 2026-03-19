@@ -23,7 +23,7 @@ const stopAllProcesses = () => {
 };
 
 startProcess(npmCommand, ["run", "api"]);
-startProcess(npmCommand, ["run", "dev"]);
+startProcess(npmCommand, ["run", "dev:web"]);
 
 process.on("SIGINT", () => {
   stopAllProcesses();

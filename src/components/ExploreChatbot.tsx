@@ -51,7 +51,10 @@ type ChatMessage = ChatRequestMessage & {
 };
 
 const CHAT_API_URL = import.meta.env.VITE_CHAT_API_URL ?? "/api/chat";
+const CHAT_HEALTH_URL = import.meta.env.VITE_CHAT_HEALTH_URL ?? "/api/health";
 const MAX_MESSAGES_TO_SEND = 10;
+const STATIC_PRESET_REPLY_DELAY_MIN_MS = 1000;
+const STATIC_PRESET_REPLY_DELAY_MAX_MS = 2000;
 
 const createWelcomeMessage = (selectedDestination: Destination | null): ChatMessage => ({
   id: "assistant-welcome",
@@ -65,6 +68,170 @@ const formatRetryMessage = (retryAfterSeconds: number) =>
   retryAfterSeconds > 0
     ? `Rate limit reached. Try again in about ${retryAfterSeconds}s.`
     : "Rate limit reached. Please wait a moment and try again.";
+
+const API_UNAVAILABLE_MESSAGE =
+  "I couldn’t reach the travel assistant service. Start both servers with `npm run dev` (or start the API with `npm run api`) and verify your Azure OpenAI values in .env.local.";
+const CHAT_NOT_CONFIGURED_MESSAGE =
+  "The travel assistant is running but not configured. Add Azure OpenAI values to .env.local, then restart the API server.";
+
+const normalizePrompt = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/[—–-]/g, " ")
+    .replace(/[^a-z0-9$\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const getStaticPresetReply = (prompt: string) => {
+  const normalized = normalizePrompt(prompt);
+
+  const isBudgetItineraryPrompt =
+    normalized.includes("7 days") &&
+    normalized.includes("$600") &&
+    normalized.includes("avoid crowds") &&
+    (normalized.includes("build me a nepal trip") || normalized.includes("nepal trip"));
+
+  if (isBudgetItineraryPrompt) {
+    return [
+      "Great constraint set—here’s a low-crowd 7-day Nepal plan around a ~$600 core budget (excluding international flights):",
+      "Day 1: Arrive Kathmandu, explore Patan + local food walk, overnight in quieter Lalitpur zone.",
+      "Day 2: Drive to Bandipur (heritage hill town), sunset ridge walk.",
+      "Day 3: Bandipur to Pokhara outskirts (Lakeside edges, not center).",
+      "Day 4: Sunrise at Peace Pagoda + easy hike to nearby villages.",
+      "Day 5: Day trip to Begnas/Rupa Lake area (calmer than main hotspots).",
+      "Day 6: Return toward Kathmandu via Dhulikhel for mountain viewpoints.",
+      "Day 7: Bhaktapur morning visit + departure.",
+      "Budget guide: stay ~$18–25/night, food ~$10–14/day, local transport ~$12–20/day, activities buffer ~$80 total.",
+      "Crowd tip: start sightseeing before 8:00 AM and shift major transit to weekday mornings.",
+    ].join("\n");
+  }
+
+  const isPokharaNearbyPrompt =
+    normalized.includes("pokhara") &&
+    (normalized.includes("what can i explore near") || normalized.includes("explore near"));
+
+  if (isPokharaNearbyPrompt) {
+    return [
+      "Near Pokhara, you can mix lakeside chill spots with short hikes and cultural stops:",
+      "- Peace Pagoda + Raniban forest trail (easy-moderate, strong city/lake views).",
+      "- Sarangkot sunrise point (best for early Himalayan panorama).",
+      "- Begnas Lake + Rupa Lake belt (quieter alternatives to busy Lakeside).",
+      "- Davis Falls + Gupteshwor Cave combo (compact half-day route).",
+      "- Pumdikot Shiva viewpoint for sunset and valley perspective.",
+      "If you want, I can also frame this as a 1-day or 2-day mini itinerary by pace (relaxed vs active).",
+    ].join("\n");
+  }
+
+  const isComparePlacesPrompt =
+    normalized.includes("how do i use this page") &&
+    normalized.includes("compare places") &&
+    normalized.includes("nepal");
+
+  if (isComparePlacesPrompt) {
+    return [
+      "Quick way to compare places on this Explore page:",
+      "1) Use From and Where To fields to set your two reference destinations.",
+      "2) Click destination cards or map pins to switch focus and inspect nearby options.",
+      "3) Check crowd trend + forecast panels to see which destination is likely calmer in coming weeks.",
+      "4) Open budget and safety tools to compare daily cost, permits, and risk level side by side.",
+      "5) Use All Places reset, then repeat with your next shortlist.",
+      "Pro move: compare the same pair for both weekday and weekend travel windows before finalizing.",
+    ].join("\n");
+  }
+
+  return null;
+};
+
+const getPrewrittenSuggestionReply = (
+  prompt: string,
+  selectedDestination: Destination | null,
+) => {
+  const genericPresetReply = getStaticPresetReply(prompt);
+
+  if (genericPresetReply) {
+    return genericPresetReply;
+  }
+
+  if (!selectedDestination) {
+    return null;
+  }
+
+  const normalized = normalizePrompt(prompt);
+  const destinationName = selectedDestination.name;
+  const destinationNameNormalized = normalizePrompt(destinationName);
+
+  const isFourDayPlanPrompt =
+    normalized.includes("plan me 4 days around") &&
+    normalized.includes(destinationNameNormalized) &&
+    normalized.includes("moderate budget") &&
+    normalized.includes("fewer crowds");
+
+  if (isFourDayPlanPrompt) {
+    return [
+      `Here’s a calmer 4-day plan around ${destinationName} with a moderate budget:`,
+      "Day 1: Arrival + local orientation walk, sunset viewpoint, early dinner.",
+      "Day 2: Core highlights in the morning, quieter neighborhoods by late afternoon.",
+      "Day 3: Easy day hike/trail + local food stop + relaxed evening.",
+      "Day 4: Short nearby excursion and departure buffer.",
+      "Budget shape: mid-range guesthouse, local meals, and shared/local transport keeps costs balanced.",
+      "Low-crowd tip: start activities before 8 AM and prioritize weekdays for top spots.",
+    ].join("\n");
+  }
+
+  const isBeginnerTrailPrompt =
+    normalized.includes("hikes") &&
+    normalized.includes("trails") &&
+    normalized.includes(destinationNameNormalized) &&
+    normalized.includes("beginners");
+
+  if (isBeginnerTrailPrompt) {
+    return [
+      `Beginner-friendly options near ${destinationName}:`,
+      "- Choose short out-and-back routes with clear trail markers and steady elevation.",
+      "- Keep total walk time around 2–4 hours for a comfortable first day.",
+      "- Start early, carry water/rain layer, and keep a return-time cutoff.",
+      "- If weather shifts, switch to nearby cultural walks or viewpoint loops.",
+      "I can also structure this into Easy / Medium options with suggested start times.",
+    ].join("\n");
+  }
+
+  const isSafetyPermitPrompt =
+    normalized.includes("safety") &&
+    normalized.includes("permit") &&
+    normalized.includes("gear") &&
+    normalized.includes(destinationNameNormalized);
+
+  if (isSafetyPermitPrompt) {
+    return [
+      `${destinationName} prep checklist (quick version):`,
+      "- Safety: monitor weather swings, keep emergency cash, and share your day plan.",
+      "- Permits: verify current local requirements before travel day and carry ID copies.",
+      "- Gear: grippy shoes, layered clothing, sun/rain protection, water, and power bank.",
+      "- Trail discipline: start early, avoid late descents, and use local guidance on remote segments.",
+      "If you want, I can convert this into a printable one-page packing and permit list.",
+    ].join("\n");
+  }
+
+  return null;
+};
+
+const getStaticReplyDelayMs = () =>
+  Math.floor(
+    Math.random() * (STATIC_PRESET_REPLY_DELAY_MAX_MS - STATIC_PRESET_REPLY_DELAY_MIN_MS + 1),
+  ) + STATIC_PRESET_REPLY_DELAY_MIN_MS;
+
+const isConnectivityError = (error: unknown) => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error instanceof TypeError ||
+    error.name === "AbortError" ||
+    error.name === "TimeoutError" ||
+    /fetch|network|failed|timed out|timeout|abort|signal/i.test(error.message)
+  );
+};
 
 const ExploreChatbot = ({
   selectedDestination,
@@ -154,6 +321,24 @@ const ExploreChatbot = ({
     ]);
   };
 
+  const verifyChatServiceAvailable = async () => {
+    const healthResponse = await fetch(CHAT_HEALTH_URL, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    const healthPayload = (await healthResponse.json().catch(() => null)) as
+      | { ok?: boolean; configured?: boolean; error?: string }
+      | null;
+
+    if (!healthResponse.ok || healthPayload?.configured === false) {
+      throw new Error(healthPayload?.error ?? CHAT_NOT_CONFIGURED_MESSAGE);
+    }
+  };
+
   const sendMessage = async (presetMessage?: string) => {
     const trimmedMessage = (presetMessage ?? input).trim();
 
@@ -191,6 +376,30 @@ const ExploreChatbot = ({
       role: "user",
       content: trimmedMessage,
     };
+    const isPrewrittenSuggestionClick = Boolean(presetMessage && suggestions.includes(presetMessage));
+    const staticPresetReply = isPrewrittenSuggestionClick
+      ? getPrewrittenSuggestionReply(trimmedMessage, selectedDestination)
+      : getStaticPresetReply(trimmedMessage);
+
+    if (staticPresetReply) {
+      setMessages((currentMessages) => [...currentMessages, nextUserMessage]);
+      setInput("");
+      setIsSending(true);
+      await new Promise<void>((resolve) => {
+        window.setTimeout(() => resolve(), getStaticReplyDelayMs());
+      });
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: `assistant-static-${Date.now()}`,
+          role: "assistant",
+          content: staticPresetReply,
+        },
+      ]);
+      setIsSending(false);
+      return;
+    }
+
     const nextMessages = [...messages, nextUserMessage];
 
     setMessages(nextMessages);
@@ -199,6 +408,8 @@ const ExploreChatbot = ({
     setRequestTimestamps([...currentWindowRequests, now]);
 
     try {
+      await verifyChatServiceAvailable();
+
       const response = await fetch(CHAT_API_URL, {
         method: "POST",
         headers: {
@@ -224,6 +435,10 @@ const ExploreChatbot = ({
           throw new Error(rateLimitMessage);
         }
 
+        if (response.status === 502 || response.status === 503 || response.status === 504) {
+          throw new Error(API_UNAVAILABLE_MESSAGE);
+        }
+
         throw new Error(payload?.error ?? "I couldn’t reach the travel assistant right now.");
       }
 
@@ -234,7 +449,11 @@ const ExploreChatbot = ({
           : "I couldn’t generate a useful travel reply just now. Please try again.",
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Something went wrong while sending the message.";
+      const message = isConnectivityError(error)
+        ? API_UNAVAILABLE_MESSAGE
+        : error instanceof Error
+          ? error.message
+          : "Something went wrong while sending the message.";
       toast.error(message);
       pushAssistantMessage(`I hit a snag: ${message}`);
     } finally {
